@@ -310,25 +310,58 @@ def sync_sets(data: SyncSetsRequest, user: dict = Depends(get_current_user)):
 @app.post("/api/stats/sync")
 def sync_stats(data: SyncStatsRequest, user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        conn.execute("""
-            INSERT INTO user_stats (user_id, stars, games, streak, played_modes_json, known_words_json, unlocked_badges_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                stars = excluded.stars,
-                games = excluded.games,
-                streak = excluded.streak,
-                played_modes_json = excluded.played_modes_json,
-                known_words_json = excluded.known_words_json,
-                unlocked_badges_json = excluded.unlocked_badges_json
-        """, (
-            user["id"],
-            data.stars,
-            data.games,
-            data.streak,
-            json.dumps(data.played_modes, ensure_ascii=False),
-            json.dumps(data.known_words, ensure_ascii=False),
-            json.dumps(data.unlocked_badges, ensure_ascii=False)
-        ))
+        current = conn.execute("SELECT * FROM user_stats WHERE user_id = ?", (user["id"],)).fetchone()
+        if current:
+            # Merge played_modes (keep max count for each game mode)
+            curr_played = json.loads(current["played_modes_json"] or "{}")
+            for k, v in data.played_modes.items():
+                curr_played[k] = max(curr_played.get(k, 0), v)
+
+            # Merge known words
+            curr_known = json.loads(current["known_words_json"] or "{}")
+            for k, v in data.known_words.items():
+                curr_known[k] = max(curr_known.get(k, 0), v)
+
+            # Merge unlocked badges
+            curr_badges = json.loads(current["unlocked_badges_json"] or "{}")
+            curr_badges.update(data.unlocked_badges)
+
+            # Monotonic safe updates: NEVER decrement stars or games!
+            final_stars = max(current["stars"] or 0, data.stars)
+            final_games = max(current["games"] or 0, data.games)
+            final_streak = max(current["streak"] or 0, data.streak)
+
+            conn.execute("""
+                UPDATE user_stats SET
+                    stars = ?,
+                    games = ?,
+                    streak = ?,
+                    played_modes_json = ?,
+                    known_words_json = ?,
+                    unlocked_badges_json = ?
+                WHERE user_id = ?
+            """, (
+                final_stars,
+                final_games,
+                final_streak,
+                json.dumps(curr_played, ensure_ascii=False),
+                json.dumps(curr_known, ensure_ascii=False),
+                json.dumps(curr_badges, ensure_ascii=False),
+                user["id"]
+            ))
+        else:
+            conn.execute("""
+                INSERT INTO user_stats (user_id, stars, games, streak, played_modes_json, known_words_json, unlocked_badges_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user["id"],
+                data.stars,
+                data.games,
+                data.streak,
+                json.dumps(data.played_modes, ensure_ascii=False),
+                json.dumps(data.known_words, ensure_ascii=False),
+                json.dumps(data.unlocked_badges, ensure_ascii=False)
+            ))
         conn.commit()
     return {"success": True}
 
