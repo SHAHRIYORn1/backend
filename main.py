@@ -3,6 +3,9 @@ import sqlite3
 import hashlib
 import secrets
 import json
+import time
+import base64
+import hmac
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -88,14 +91,53 @@ init_db()
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
-# Auth dependency
+# Multi-session Signed Token Helper (supports multiple devices/browsers simultaneously without kicking each other out)
+TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "soztop-secure-multi-session-secret-2026")
+
+def create_access_token(user_id: int, username: str) -> str:
+    payload = {
+        "uid": user_id,
+        "un": username,
+        "ts": int(time.time()),
+        "nonce": secrets.token_hex(8)
+    }
+    raw = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+    b64_payload = base64.urlsafe_b64encode(raw).decode('utf-8').rstrip('=')
+    sig = hmac.new(TOKEN_SECRET.encode('utf-8'), b64_payload.encode('utf-8'), hashlib.sha256).hexdigest()
+    return f"{b64_payload}.{sig}"
+
+def decode_token(token: str) -> Optional[int]:
+    try:
+        if "." in token:
+            parts = token.split(".")
+            if len(parts) == 2:
+                b64_payload, sig = parts
+                expected_sig = hmac.new(TOKEN_SECRET.encode('utf-8'), b64_payload.encode('utf-8'), hashlib.sha256).hexdigest()
+                if hmac.compare_digest(sig, expected_sig):
+                    pad = len(b64_payload) % 4
+                    if pad:
+                        b64_payload += "=" * (4 - pad)
+                    payload_json = base64.urlsafe_b64decode(b64_payload.encode('utf-8')).decode('utf-8')
+                    payload = json.loads(payload_json)
+                    return payload.get("uid")
+    except Exception:
+        pass
+    return None
+
+# Auth dependency (validates both multi-session signed tokens and legacy DB tokens)
 def get_current_user(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Avtorizatsiya talab qilinadi")
     token = authorization.split(" ")[1]
     
+    uid = decode_token(token)
     with get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE token = ?", (token,)).fetchone()
+        if uid is not None:
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+        else:
+            # Fallback for legacy random hex tokens stored in DB
+            user = conn.execute("SELECT * FROM users WHERE token = ?", (token,)).fetchone()
+
         if not user:
             raise HTTPException(status_code=401, detail="Yaroqsiz yoki eskirgan token")
         return dict(user)
@@ -164,7 +206,6 @@ def register(data: RegisterRequest):
     if len(data.password) < 8:
         raise HTTPException(status_code=400, detail="Parol kamida 8 ta belgidan iborat bo'lishi kerak (harf, son va belgilar)")
 
-    token = secrets.token_hex(24)
     pwd_hash = hash_password(data.password)
 
     try:
@@ -172,9 +213,11 @@ def register(data: RegisterRequest):
             cur = conn.cursor()
             cur.execute(
                 "INSERT INTO users (username, password_hash, full_name, avatar, token) VALUES (?, ?, ?, ?, ?)",
-                (username, pwd_hash, data.full_name.strip(), data.avatar or "🦁", token)
+                (username, pwd_hash, data.full_name.strip(), data.avatar or "🦁", "")
             )
             user_id = cur.lastrowid
+            token = create_access_token(user_id, username)
+            cur.execute("UPDATE users SET token = ? WHERE id = ?", (token, user_id))
             # Init empty stats
             cur.execute(
                 "INSERT INTO user_stats (user_id) VALUES (?)",
@@ -210,7 +253,7 @@ def login(data: LoginRequest):
         if not user:
             raise HTTPException(status_code=400, detail="Username yoki parol noto'g'ri")
 
-        token = secrets.token_hex(24)
+        token = create_access_token(user["id"], user["username"])
         conn.execute("UPDATE users SET token = ? WHERE id = ?", (token, user["id"]))
         conn.commit()
 
