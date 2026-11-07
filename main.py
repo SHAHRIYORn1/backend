@@ -335,20 +335,39 @@ def get_sets(user: dict = Depends(get_current_user)):
 @app.post("/api/sets/sync")
 def sync_sets(data: SyncSetsRequest, user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        for s in data.sets:
-            words_str = json.dumps([w.model_dump() for w in s.words], ensure_ascii=False)
-            conn.execute("""
-                INSERT INTO word_sets (id, user_id, name, src, target_lang, words_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    src = excluded.src,
-                    target_lang = excluded.target_lang,
-                    words_json = excluded.words_json,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (s.id, user["id"], s.name, s.src, s.to, words_str))
+        active_ids = [s.id for s in data.sets]
+        if active_ids:
+            # Delete any sets belonging to this user that are NOT in active_ids
+            placeholders = ",".join("?" for _ in active_ids)
+            conn.execute(
+                f"DELETE FROM word_sets WHERE user_id = ? AND id NOT IN ({placeholders})",
+                (user["id"], *active_ids)
+            )
+            for s in data.sets:
+                words_str = json.dumps([w.model_dump() for w in s.words], ensure_ascii=False)
+                conn.execute("""
+                    INSERT INTO word_sets (id, user_id, name, src, target_lang, words_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        src = excluded.src,
+                        target_lang = excluded.target_lang,
+                        words_json = excluded.words_json,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (s.id, user["id"], s.name, s.src, s.to, words_str))
+        else:
+            # If client sets list is empty, delete all sets for this user
+            conn.execute("DELETE FROM word_sets WHERE user_id = ?", (user["id"],))
+
         conn.commit()
     return {"success": True, "count": len(data.sets)}
+
+@app.delete("/api/sets/{set_id}")
+def delete_single_set(set_id: str, user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        conn.execute("DELETE FROM word_sets WHERE id = ? AND user_id = ?", (set_id, user["id"]))
+        conn.commit()
+    return {"success": True, "deleted_id": set_id}
 
 @app.post("/api/stats/sync")
 def sync_stats(data: SyncStatsRequest, user: dict = Depends(get_current_user)):
