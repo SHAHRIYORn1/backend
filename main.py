@@ -134,12 +134,12 @@ class SyncSetsRequest(BaseModel):
     sets: List[WordSetModel]
 
 class SyncStatsRequest(BaseModel):
-    stars: int
-    games: int
-    streak: int
-    played_modes: Dict[str, int]
-    known_words: Dict[str, int]
-    unlocked_badges: Dict[str, str]
+    stars: int = 0
+    games: int = 0
+    streak: int = 0
+    played_modes: Optional[Dict[str, Any]] = None
+    known_words: Optional[Dict[str, Any]] = None
+    unlocked_badges: Optional[Dict[str, Any]] = None
 
 # API Endpoints
 @app.get("/")
@@ -161,8 +161,8 @@ def register(data: RegisterRequest):
     username = data.username.strip().lower()
     if len(username) < 3:
         raise HTTPException(status_code=400, detail="Username kamida 3 ta belgidan iborat bo'lishi kerak")
-    if len(data.password) < 4:
-        raise HTTPException(status_code=400, detail="Parol kamida 4 ta belgidan iborat bo'lishi kerak")
+    if len(data.password) < 8:
+        raise HTTPException(status_code=400, detail="Parol kamida 8 ta belgidan iborat bo'lishi kerak (harf, son va belgilar)")
 
     token = secrets.token_hex(24)
     pwd_hash = hash_password(data.password)
@@ -314,17 +314,26 @@ def sync_stats(data: SyncStatsRequest, user: dict = Depends(get_current_user)):
         if current:
             # Merge played_modes (keep max count for each game mode)
             curr_played = json.loads(current["played_modes_json"] or "{}")
-            for k, v in data.played_modes.items():
-                curr_played[k] = max(curr_played.get(k, 0), v)
+            if data.played_modes:
+                for k, v in data.played_modes.items():
+                    try:
+                        curr_played[k] = max(curr_played.get(k, 0), int(v))
+                    except (ValueError, TypeError):
+                        pass
 
             # Merge known words
             curr_known = json.loads(current["known_words_json"] or "{}")
-            for k, v in data.known_words.items():
-                curr_known[k] = max(curr_known.get(k, 0), v)
+            if data.known_words:
+                for k, v in data.known_words.items():
+                    try:
+                        curr_known[k] = max(curr_known.get(k, 0), int(v))
+                    except (ValueError, TypeError):
+                        pass
 
             # Merge unlocked badges
             curr_badges = json.loads(current["unlocked_badges_json"] or "{}")
-            curr_badges.update(data.unlocked_badges)
+            if data.unlocked_badges:
+                curr_badges.update(data.unlocked_badges)
 
             # Monotonic safe updates: NEVER decrement stars or games!
             final_stars = max(current["stars"] or 0, data.stars)
@@ -358,9 +367,9 @@ def sync_stats(data: SyncStatsRequest, user: dict = Depends(get_current_user)):
                 data.stars,
                 data.games,
                 data.streak,
-                json.dumps(data.played_modes, ensure_ascii=False),
-                json.dumps(data.known_words, ensure_ascii=False),
-                json.dumps(data.unlocked_badges, ensure_ascii=False)
+                json.dumps(data.played_modes or {}, ensure_ascii=False),
+                json.dumps(data.known_words or {}, ensure_ascii=False),
+                json.dumps(data.unlocked_badges or {}, ensure_ascii=False)
             ))
         conn.commit()
     return {"success": True}
